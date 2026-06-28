@@ -40,49 +40,78 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    log_msg("INFO", "Receiver listening on port " + std::to_string(port) + "...");
+    log_msg("INFO", "Receiver active on port " + std::to_string(port) + ". Expecting data...");
 
     uint8_t network_buffer[HEADER_SIZE + MAX_PAYLOAD_SIZE];
     sockaddr_in src_addr{};
     socklen_t addr_len = sizeof(src_addr);
 
-    bool transfer_active = true;
+    uint32_t expected_seq_num = 0; 
+    bool running = true;
 
-    while (transfer_active) {
-        ssize_t bytes_received = recvfrom(sockfd, network_buffer, sizeof(network_buffer), 0,
-                                          (struct sockaddr*)&src_addr, &addr_len);
-        if (bytes_received < static_cast<ssize_t>(HEADER_SIZE)) {
-            log_msg("WARN", "Corrupted or tiny fragments ignored.");
+    while (running) {
+        ssize_t bytes_recvd = recvfrom(sockfd, network_buffer, sizeof(network_buffer), 0,
+                                         (struct sockaddr*)&src_addr, &addr_len);
+        if (bytes_recvd < static_cast<ssize_t>(HEADER_SIZE)) continue;
+
+        // Verify Checksum Integrity
+        Packet pkt = deserialize_packet(network_buffer, bytes_recvd);
+        uint16_t received_chk = pkt.header.checksum;
+        uint16_t zero_chk = 0;
+        std::memcpy(&network_buffer[10], &zero_chk, 2);
+        uint16_t computed_chk = compute_checksum(network_buffer, bytes_recvd);
+
+        if (received_chk != computed_chk) {
+            log_msg("DROP", "Bad Checksum. Drop frame.");
             continue;
         }
 
-        // Validate Checksum 
-        // 1. Snapshot original checksum field
-        Packet extracted_pkt = deserialize_packet(network_buffer, bytes_received);
-        uint16_t received_checksum = extracted_pkt.header.checksum;
+        if (pkt.header.flags & FLAG_DATA) {
+            if (pkt.header.seq_num == expected_seq_num) {
+                // In-order packet arrived
+                log_msg("RCVD", "Accepting Packet. Seq: " + std::to_string(pkt.header.seq_num) + ", Data Size: " + std::to_string(pkt.header.length));
+                outfile.write(pkt.payload, pkt.header.length);
+                expected_seq_num += pkt.header.length;
+            } else if (pkt.header.seq_num < expected_seq_num) {
+                // Duplicate packet arrived (Previous ACK was likely lost in the network)
+                log_msg("WARN", "Duplicate packet received (Seq: " + std::to_string(pkt.header.seq_num) + "). Re-sending ACK.");
+            } else {
+                // Out-of-order packet (Should not occur in pure Stop-and-Wait, but safely ignored)
+                log_msg("WARN", "Out of order packet received. Dropping.");
+                continue;
+            }
 
-        // 2. Zero out checksum location inside buffer to recompute validation value
-        uint16_t zero_check = 0;
-        std::memcpy(&network_buffer[10], &zero_check, 2);
-        uint16_t local_checksum = compute_checksum(network_buffer, bytes_received);
+            // Build and transmit ACK response packet
+            Packet ack_pkt{};
+            ack_pkt.header.ack_num = expected_seq_num; 
+            ack_pkt.header.flags = FLAG_ACK;
+            ack_pkt.header.length = 0;
 
-        if (local_checksum != received_checksum) {
-            log_msg("DROP", "Checksum mismatched! Packet dropped. Received: " + 
-                    std::to_string(received_checksum) + ", Expected: " + std::to_string(local_checksum));
-            continue;
-        }
+            std::vector<uint8_t> temp_ack = serialize_packet(ack_pkt);
+            ack_pkt.header.checksum = compute_checksum(temp_ack.data(), temp_ack.size());
+            std::vector<uint8_t> final_ack = serialize_packet(ack_pkt);
 
-        if (extracted_pkt.header.flags & FLAG_FIN) {
-            log_msg("RCVD", "FIN received. Closing file transmission smoothly.");
-            transfer_active = false;
-        } else if (extracted_pkt.header.flags & FLAG_DATA) {
-            log_msg("RCVD", "Received Packet Seq: " + std::to_string(extracted_pkt.header.seq_num) + 
-                    ", Length: " + std::to_string(extracted_pkt.header.length));
+            sendto(sockfd, final_ack.data(), final_ack.size(), 0, (struct sockaddr*)&src_addr, addr_len);
+            log_msg("SEND", "Dispatched ACK: " + std::to_string(expected_seq_num));
+        } 
+        else if (pkt.header.flags & FLAG_FIN) {
+            log_msg("RCVD", "FIN packet received. Replying with FIN-ACK.");
             
-            outfile.write(extracted_pkt.payload, extracted_pkt.header.length);
+            Packet fin_ack{};
+            fin_ack.header.ack_num = pkt.header.seq_num;
+            fin_ack.header.flags = FLAG_ACK;
+            fin_ack.header.length = 0;
+
+            std::vector<uint8_t> temp_fa = serialize_packet(fin_ack);
+            fin_ack.header.checksum = compute_checksum(temp_fa.data(), temp_fa.size());
+            std::vector<uint8_t> final_fa = serialize_packet(fin_ack);
+
+            sendto(sockfd, final_fa.data(), final_fa.size(), 0, (struct sockaddr*)&src_addr, addr_len);
+            running = false;
         }
     }
 
+    log_msg("SUCCESS", "File writing completed.");
     outfile.close();
     close(sockfd);
     return 0;
