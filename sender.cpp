@@ -8,13 +8,15 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <algorithm>
 #include "packet.hpp"
 #include "logger.hpp"
 #include "timer.hpp"
 
 enum SenderAlgorithm{
     STOP_AND_WAIT,
-    SLIDING_WINDOW
+    SLIDING_WINDOW,
+    CONGESTION_CONTROL
 };
 
 class UdpSender {
@@ -67,8 +69,11 @@ public:
             log_msg("INFO", "Starting Stop-and-Wait transmission...");
             success = run_stop_and_wait(infile, seq_num);
         } else if (alg == SLIDING_WINDOW) {
-            log_msg("INFO", "Starting Sliding Window transmission...");
+            log_msg("INFO", "Starting Standard Sliding Window transmission...");
             success = run_sliding_window(infile, seq_num);
+        } else if (alg == CONGESTION_CONTROL) {
+            log_msg("INFO", "Starting Congestion Control transmission...");
+            success = run_congestion_control(infile, seq_num);
         }
 
         if (success) {
@@ -204,6 +209,139 @@ private:
         return true;
     }
 
+    bool run_congestion_control(std::ifstream& infile, uint32_t& seq_num) {
+        const uint32_t RECEIVER_WINDOW = 50; 
+        double cwnd = 1.0;
+        uint32_t ssthresh = 16;
+        
+        std::ofstream cwnd_file("cwnd.csv");
+        std::ofstream events_file("events.log");
+        
+        cwnd_file << "Time(ms),cwnd,ssthresh\n";
+        
+        auto log_event = [this, &events_file](const std::string& event, const std::string& details) {
+            double now = this->total_transfer_timer.elapsed_ms();
+            events_file << now << "," << event << "," << details << "\n";
+            log_msg(event, details); 
+        };
+        
+        auto log_cwnd = [this, &cwnd_file, &cwnd, &ssthresh]() {
+            double now = this->total_transfer_timer.elapsed_ms();
+            cwnd_file << now << "," << cwnd << "," << ssthresh << "\n";
+        };
+        
+        log_cwnd();
+
+        struct WindowPacket {
+            uint32_t seq_num;
+            uint32_t expected_ack;
+            std::vector<uint8_t> data;
+        };
+        std::vector<WindowPacket> window;
+
+        bool eof_reached = false;
+        char file_buffer[MAX_PAYLOAD_SIZE];
+        Timer window_timer;
+        bool timer_running = false;
+
+        while (!eof_reached || !window.empty()) {
+            uint32_t effective_window = std::min(RECEIVER_WINDOW, static_cast<uint32_t>(cwnd));
+
+            while (window.size() < effective_window && !eof_reached) {
+                if (!infile.read(file_buffer, MAX_PAYLOAD_SIZE) && infile.gcount() == 0) {
+                    eof_reached = true;
+                    break;
+                }
+
+                size_t bytes_read = infile.gcount();
+                std::vector<uint8_t> pkt_data = build_packet(seq_num, FLAG_DATA, file_buffer, bytes_read);
+                uint32_t expected_ack = seq_num + bytes_read;
+                
+                window.push_back({seq_num, expected_ack, pkt_data});
+                
+                sendto(sockfd, pkt_data.data(), pkt_data.size(), 0, (struct sockaddr*)&rec_addr, sizeof(rec_addr));
+                total_packets_sent++;
+                log_event("SEND", "Sent DATA Packet (Seq: " + std::to_string(seq_num) + ")");
+                
+                if (!timer_running) {
+                    window_timer.start();
+                    timer_running = true;
+                }
+                seq_num += bytes_read;
+            }
+
+            uint8_t ack_buffer[HEADER_SIZE + MAX_PAYLOAD_SIZE];
+            sockaddr_in src_addr{};
+            socklen_t addr_len = sizeof(src_addr);
+
+            ssize_t res = recvfrom(sockfd, ack_buffer, sizeof(ack_buffer), 0, (struct sockaddr*)&src_addr, &addr_len);
+            
+            if (res >= static_cast<ssize_t>(HEADER_SIZE)) {
+                Packet ack_pkt = deserialize_packet(ack_buffer, res);
+                uint16_t received_chk = ack_pkt.header.checksum;
+                
+                uint16_t zero_check = 0;
+                std::memcpy(&ack_buffer[10], &zero_check, 2); 
+
+                if (compute_checksum(ack_buffer, res) == received_chk && (ack_pkt.header.flags & FLAG_ACK)) {
+                    uint32_t ack_num = ack_pkt.header.ack_num;
+                    int acked_packets = 0;
+
+                    auto it = window.begin();
+                    while (it != window.end()) {
+                        if (it->expected_ack <= ack_num) {
+                            it = window.erase(it);
+                            acked_packets++;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    if (acked_packets > 0) {
+                        log_event("ACK", "Window advanced to ACK: " + std::to_string(ack_num));
+                        
+                        for (int i = 0; i < acked_packets; ++i) {
+                            if (cwnd < ssthresh) {
+                                // Slow Start
+                                cwnd += 1.0;
+                            } else {
+                                // Congestion Avoidance
+                                cwnd += 1.0 / static_cast<int>(cwnd);
+                            }
+                        }
+                        log_cwnd();
+
+                        if (window.empty()) {
+                            timer_running = false;
+                        } else {
+                            window_timer.start(); 
+                        }
+                    }
+                }
+            }
+
+            if (timer_running && window_timer.elapsed_ms() >= 1000.0) {
+                log_event("TIMEOUT", "RTO expired. Adjusting ssthresh and cwnd...");
+                
+                ssthresh = std::max<uint32_t>(static_cast<uint32_t>(cwnd) / 2, 1);
+                cwnd = 1.0;
+                log_cwnd();
+
+                for (const auto& pkt : window) {
+                    sendto(sockfd, pkt.data.data(), pkt.data.size(), 0, (struct sockaddr*)&rec_addr, sizeof(rec_addr));
+                    total_packets_sent++;
+                    total_retransmissions++;
+                    log_event("RETRANSMIT", "Retransmitted DATA Packet (Seq: " + std::to_string(pkt.seq_num) + ")");
+                }
+                window_timer.start(); 
+            }
+        }
+        
+        cwnd_file.close();
+        events_file.close();
+        return true;
+    }
+
     std::vector<uint8_t> build_packet(uint32_t seq_num, uint8_t flags, const char* payload, size_t length) {
         Packet pkt{};
         pkt.header.seq_num = seq_num;
@@ -221,7 +359,6 @@ private:
         return serialize_packet(pkt);
     }
 
-    
     bool receive_and_validate_ack(uint32_t expected_ack, uint8_t expected_flag) {
         uint8_t ack_buffer[HEADER_SIZE + MAX_PAYLOAD_SIZE];
         sockaddr_in src_addr{};
@@ -235,7 +372,6 @@ private:
         Packet ack_pkt = deserialize_packet(ack_buffer, res);
         uint16_t received_chk = ack_pkt.header.checksum;
         
-        
         uint16_t zero_check = 0;
         std::memcpy(&ack_buffer[10], &zero_check, 2);
 
@@ -247,14 +383,12 @@ private:
         return false;
     }
 
-    
     void send_and_wait(const std::vector<uint8_t>& packet_data,
                     uint32_t expected_ack,
                     uint32_t current_seq,
                     const std::string& pkt_type) {
         bool ack_received = false;
 
-        
         sendto(sockfd, packet_data.data(), packet_data.size(), 0,
             (struct sockaddr*)&rec_addr, sizeof(rec_addr));
 
@@ -297,7 +431,7 @@ private:
 
     void print_metrics() const {
         std::cout << "\n========================================" << std::endl;
-        std::cout << "        PHASE 1 TRANSFER METRICS        " << std::endl;
+        std::cout << "        TRANSFER METRICS          " << std::endl;
         std::cout << "========================================" << std::endl;
         std::cout << "Total Packets Sent (incl. retrans): " << total_packets_sent << std::endl;
         std::cout << "Number of Retransmissions         : " << total_retransmissions << std::endl;
@@ -308,20 +442,25 @@ private:
 
 int main(int argc, char* argv[]) {
     if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " <receiver_ip> <receiver_port> <input_file>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <receiver_ip> <receiver_port> <input_file> [--cc]" << std::endl;
         return 1;
     }
 
     std::string rec_ip = argv[1];
     int rec_port = std::stoi(argv[2]);
     std::string filename = argv[3];
+    
+    SenderAlgorithm current_algorithm = SLIDING_WINDOW;
+    if (argc >= 5 && std::string(argv[4]) == "--cc") {
+        current_algorithm = CONGESTION_CONTROL;
+    }
 
     UdpSender sender(rec_ip, rec_port);
     if (!sender.init()) {
         return 1;
     }
 
-    if (!sender.transfer_file(SLIDING_WINDOW, filename)) {
+    if (!sender.transfer_file(current_algorithm, filename)) {
         return 1;
     }
 
