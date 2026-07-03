@@ -3,6 +3,7 @@
 #include <cstring>
 #include <vector>
 #include <string>
+#include <map> 
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
@@ -88,6 +89,7 @@ private:
     sockaddr_in local_addr;
     std::ofstream outfile;
     uint32_t expected_seq_num;
+    std::map<uint32_t, Packet> packet_buffer; // Out-of-order packet buffer
 
     bool validate_checksum(uint8_t* buffer, ssize_t length) {
         Packet pkt = deserialize_packet(buffer, length);
@@ -119,11 +121,18 @@ private:
             outfile.write(pkt.payload, pkt.header.length);
             expected_seq_num += pkt.header.length;
             log_msg("RCVD", "Accepted Seq: " + std::to_string(pkt.header.seq_num));
+
+            while (packet_buffer.count(expected_seq_num)) {
+                Packet next_pkt = packet_buffer[expected_seq_num];
+                outfile.write(next_pkt.payload, next_pkt.header.length);
+                packet_buffer.erase(expected_seq_num);
+                expected_seq_num += next_pkt.header.length;
+            }
         } else if (pkt.header.seq_num < expected_seq_num) {
             log_msg("WARN", "Received duplicate Seq: " + std::to_string(pkt.header.seq_num) + ". Dropping data payload.");
         } else {
-            log_msg("WARN", "Out-of-order Seq: " + std::to_string(pkt.header.seq_num) + " dropped.");
-            return; 
+            packet_buffer[pkt.header.seq_num] = pkt;
+            log_msg("WARN", "Out-of-order Seq: " + std::to_string(pkt.header.seq_num) + " buffered.");
         }
 
         send_ack(expected_seq_num, src_addr, addr_len);
