@@ -75,7 +75,7 @@ public:
             std::vector<uint8_t> fin_buf = build_packet(seq_num, FLAG_FIN, nullptr, 0);
             send_and_wait(fin_buf, seq_num, seq_num, "FIN");
 
-            total_transfer_timer.stop();
+            total_transfer_time = total_transfer_timer.elapsed_ms();
             infile.close();
             print_metrics();
             return true;
@@ -94,6 +94,7 @@ private:
     uint32_t total_packets_sent;
     uint32_t total_retransmissions;
     Timer total_transfer_timer;
+    double total_transfer_time;
     Timer packet_timer;
 
     bool run_stop_and_wait(std::ifstream& infile, uint32_t& seq_num) {
@@ -128,26 +129,27 @@ private:
 
         while (!eof_reached || !window.empty()) {
             while (window.size() < WINDOW_SIZE && !eof_reached) {
-                if (infile.read(file_buffer, MAX_PAYLOAD_SIZE) || infile.gcount() > 0) {
-                    size_t bytes_read = infile.gcount();
-                    std::vector<uint8_t> pkt_data = build_packet(seq_num, FLAG_DATA, file_buffer, bytes_read);
-                    uint32_t expected_ack = seq_num + bytes_read;
-                    
-                    window.push_back({seq_num, expected_ack, pkt_data});
-                    
-                    sendto(sockfd, pkt_data.data(), pkt_data.size(), 0, (struct sockaddr*)&rec_addr, sizeof(rec_addr));
-                    total_packets_sent++;
-                    log_msg("SEND", "Sent DATA Packet (Seq: " + std::to_string(seq_num) + 
-                                    ", Bytes: " + std::to_string(pkt_data.size()) + ")");
-                    
-                    if (!timer_running) {
-                        window_timer.start();
-                        timer_running = true;
-                    }
-                    seq_num += bytes_read;
-                } else {
+                if (!infile.read(file_buffer, MAX_PAYLOAD_SIZE) && infile.gcount() == 0) {
                     eof_reached = true;
+                    break;
                 }
+
+                size_t bytes_read = infile.gcount();
+                std::vector<uint8_t> pkt_data = build_packet(seq_num, FLAG_DATA, file_buffer, bytes_read);
+                uint32_t expected_ack = seq_num + bytes_read;
+                
+                window.push_back({seq_num, expected_ack, pkt_data});
+                
+                sendto(sockfd, pkt_data.data(), pkt_data.size(), 0, (struct sockaddr*)&rec_addr, sizeof(rec_addr));
+                total_packets_sent++;
+                log_msg("SEND", "Sent DATA Packet (Seq: " + std::to_string(seq_num) + 
+                                ", Bytes: " + std::to_string(pkt_data.size()) + ")");
+                
+                if (!timer_running) {
+                    window_timer.start();
+                    timer_running = true;
+                }
+                seq_num += bytes_read;
             }
 
             uint8_t ack_buffer[HEADER_SIZE + MAX_PAYLOAD_SIZE];
@@ -267,8 +269,6 @@ private:
 
             if (receive_and_validate_ack(expected_ack, target_flag)) {
                 ack_received = true;
-                packet_timer.stop();
-
                 log_msg("ACK ", "Received valid ACK for " + pkt_type +
                             " (Seq: " + std::to_string(current_seq) + ")");
                 break;
@@ -301,7 +301,7 @@ private:
         std::cout << "========================================" << std::endl;
         std::cout << "Total Packets Sent (incl. retrans): " << total_packets_sent << std::endl;
         std::cout << "Number of Retransmissions         : " << total_retransmissions << std::endl;
-        std::cout << "Total File Transfer Time          : " << total_transfer_timer.elapsed_ms() << " ms" << std::endl;
+        std::cout << "Total File Transfer Time          : " << total_transfer_time << " ms" << std::endl;
         std::cout << "========================================" << std::endl;
     }
 };

@@ -7,13 +7,16 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <cstdlib>
+#include <ctime>
 #include "packet.hpp"
 #include "logger.hpp"
 
 class UdpReceiver {
 public:
-    UdpReceiver(int port, const std::string& filename)
-        : port(port), filename(filename), sockfd(-1), expected_seq_num(0) {
+    UdpReceiver(int port, const std::string& filename, double loss_prob = 0.0, int delay_ms = 0)
+        : port(port), filename(filename), sockfd(-1), expected_seq_num(0), 
+          loss_prob(loss_prob), delay_ms(delay_ms) {
         std::memset(&local_addr, 0, sizeof(local_addr));
     }
 
@@ -24,6 +27,8 @@ public:
     }
 
     bool init() {
+        std::srand(std::time(nullptr));
+
         sockfd = socket(AF_INET, SOCK_DGRAM, 0);
         if (sockfd < 0) {
             log_msg("ERROR", "Failed to open socket");
@@ -63,6 +68,14 @@ public:
                 continue;
             }
 
+            if (loss_prob > 0.0) {
+                double drop_roll = static_cast<double>(std::rand()) / RAND_MAX;
+                if (drop_roll < loss_prob) {
+                    log_msg("DROP", "Simulated Artificial Loss. Ignoring incoming packet completely.");
+                    continue;
+                }
+            }
+
             if (!validate_checksum(network_buffer, bytes_received)) {
                 log_msg("DROP", "Corrupted frame detected via checksum. Dropping.");
                 continue;
@@ -90,6 +103,9 @@ private:
     std::ofstream outfile;
     uint32_t expected_seq_num;
     std::map<uint32_t, Packet> packet_buffer; // Out-of-order packet buffer
+    
+    double loss_prob;
+    int delay_ms;
 
     bool validate_checksum(uint8_t* buffer, ssize_t length) {
         Packet pkt = deserialize_packet(buffer, length);
@@ -102,6 +118,10 @@ private:
     }
 
     void send_ack(uint32_t ack_num, const sockaddr_in& src_addr, socklen_t addr_len) {
+        if (delay_ms > 0) {
+            usleep(delay_ms * 1000);
+        }
+
         Packet ack_pkt{};
         ack_pkt.header.seq_num = 0;
         ack_pkt.header.ack_num = ack_num;
@@ -146,16 +166,33 @@ private:
     }
 };
 
+void read_cmd_args(int argc, char * argv[], int &port, std::string &filename, double &loss_prob, int &delay_ms ){
+    port = std::stoi(argv[1]);
+    filename = argv[2];
+
+    for (int i = 3; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--loss" && i + 1 < argc) {
+            loss_prob = std::stod(argv[++i]);
+        } else if (arg == "--delay" && i + 1 < argc) {
+            delay_ms = std::stoi(argv[++i]);
+        }
+    }
+}
 int main(int argc, char* argv[]) {
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <port> <output_file>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <port> <output_file> [--loss <probability>] [--delay <ms>]" << std::endl;
         return 1;
     }
 
-    int port = std::stoi(argv[1]);
-    std::string filename = argv[2];
+    int port;
+    std::string filename;
+    double loss_prob = 0.0;
+    int delay_ms = 0;
+    read_cmd_args(argc, argv, port, filename, loss_prob, delay_ms);
 
-    UdpReceiver receiver(port, filename);
+
+    UdpReceiver receiver(port, filename, loss_prob, delay_ms);
     if (!receiver.init()) {
         return 1;
     }
