@@ -440,9 +440,20 @@ private:
     }
 };
 
+
+SenderAlgorithm string_to_algorithm(const std::string& alg_name) {
+    if (alg_name == "stop-and-wait") return STOP_AND_WAIT;
+    if (alg_name == "sliding-window") return SLIDING_WINDOW;
+    if (alg_name == "congestion-control") return CONGESTION_CONTROL;
+    
+    std::cerr << "Unreconginzed Algorithm" << std::endl;
+    exit(-1); 
+}
+
+
 int main(int argc, char* argv[]) {
     if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " <receiver_ip> <receiver_port> <input_file> [--cc]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <receiver_ip> <receiver_port> <input_file> <algorithm name>" << std::endl;
         return 1;
     }
 
@@ -450,10 +461,8 @@ int main(int argc, char* argv[]) {
     int rec_port = std::stoi(argv[2]);
     std::string filename = argv[3];
     
-    SenderAlgorithm current_algorithm = SLIDING_WINDOW;
-    if (argc >= 5 && std::string(argv[4]) == "--cc") {
-        current_algorithm = CONGESTION_CONTROL;
-    }
+    std::string alg_input = argv[4];
+    SenderAlgorithm current_algorithm = string_to_algorithm(alg_input);
 
     UdpSender sender(rec_ip, rec_port);
     if (!sender.init()) {
