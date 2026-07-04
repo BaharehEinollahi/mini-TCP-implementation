@@ -16,13 +16,16 @@
 enum SenderAlgorithm{
     STOP_AND_WAIT,
     SLIDING_WINDOW,
-    CONGESTION_CONTROL
+    CONGESTION_CONTROL,
+    FAST_RETRANSMIT
 };
 
 class UdpSender {
 public:
     UdpSender(const std::string& ip, int port) 
-        : rec_ip(ip), rec_port(port), sockfd(-1), total_packets_sent(0), total_retransmissions(0) {
+        : rec_ip(ip), rec_port(port), sockfd(-1), 
+          total_packets_sent(0), total_retransmissions(0), 
+          total_timeouts(0), total_fast_retransmits(0) {
         std::memset(&rec_addr, 0, sizeof(rec_addr));
     }
 
@@ -74,6 +77,9 @@ public:
         } else if (alg == CONGESTION_CONTROL) {
             log_msg("INFO", "Starting Congestion Control transmission...");
             success = run_congestion_control(infile, seq_num);
+        } else if (alg == FAST_RETRANSMIT) {
+            log_msg("INFO", "Starting Fast Retransmit & Recovery transmission...");
+            success = run_fast_retransmit(infile, seq_num);
         }
 
         if (success) {
@@ -98,6 +104,9 @@ private:
 
     uint32_t total_packets_sent;
     uint32_t total_retransmissions;
+    uint32_t total_timeouts;
+    uint32_t total_fast_retransmits;
+
     Timer total_transfer_timer;
     double total_transfer_time;
     Timer packet_timer;
@@ -196,6 +205,7 @@ private:
             }
 
             if (timer_running && window_timer.elapsed_ms() >= 1000.0) {
+                total_timeouts++;
                 log_msg("TIMEOUT", "RTO expired. Retransmitting entire window...");
                 for (const auto& pkt : window) {
                     sendto(sockfd, pkt.data.data(), pkt.data.size(), 0, (struct sockaddr*)&rec_addr, sizeof(rec_addr));
@@ -302,10 +312,10 @@ private:
                         
                         for (int i = 0; i < acked_packets; ++i) {
                             if (cwnd < ssthresh) {
-                                // Slow Start
+                                
                                 cwnd += 1.0;
                             } else {
-                                // Congestion Avoidance
+                                
                                 cwnd += 1.0 / static_cast<int>(cwnd);
                             }
                         }
@@ -321,10 +331,179 @@ private:
             }
 
             if (timer_running && window_timer.elapsed_ms() >= 1000.0) {
+                total_timeouts++;
                 log_event("TIMEOUT", "RTO expired. Adjusting ssthresh and cwnd...");
                 
                 ssthresh = std::max<uint32_t>(static_cast<uint32_t>(cwnd) / 2, 1);
                 cwnd = 1.0;
+                log_cwnd();
+
+                for (const auto& pkt : window) {
+                    sendto(sockfd, pkt.data.data(), pkt.data.size(), 0, (struct sockaddr*)&rec_addr, sizeof(rec_addr));
+                    total_packets_sent++;
+                    total_retransmissions++;
+                    log_event("RETRANSMIT", "Retransmitted DATA Packet (Seq: " + std::to_string(pkt.seq_num) + ")");
+                }
+                window_timer.start(); 
+            }
+        }
+        
+        cwnd_file.close();
+        events_file.close();
+        return true;
+    }
+
+    bool run_fast_retransmit(std::ifstream& infile, uint32_t& seq_num) {
+        const uint32_t RECEIVER_WINDOW = 50; 
+        double cwnd = 1.0;
+        uint32_t ssthresh = 16;
+        
+        std::ofstream cwnd_file("cwnd.csv");
+        std::ofstream events_file("events.log");
+        
+        cwnd_file << "Time(ms),cwnd,ssthresh\n";
+        
+        auto log_event = [this, &events_file](const std::string& event, const std::string& details) {
+            double now = this->total_transfer_timer.elapsed_ms();
+            events_file << now << "," << event << "," << details << "\n";
+            log_msg(event, details); 
+        };
+        
+        auto log_cwnd = [this, &cwnd_file, &cwnd, &ssthresh]() {
+            double now = this->total_transfer_timer.elapsed_ms();
+            cwnd_file << now << "," << cwnd << "," << ssthresh << "\n";
+        };
+        
+        log_cwnd();
+
+        struct WindowPacket {
+            uint32_t seq_num;
+            uint32_t expected_ack;
+            std::vector<uint8_t> data;
+        };
+        std::vector<WindowPacket> window;
+
+        bool eof_reached = false;
+        char file_buffer[MAX_PAYLOAD_SIZE];
+        Timer window_timer;
+        bool timer_running = false;
+
+        uint32_t last_ack_num = seq_num; 
+        int dup_ack_count = 0;
+
+        while (!eof_reached || !window.empty()) {
+            uint32_t effective_window = std::min(RECEIVER_WINDOW, static_cast<uint32_t>(cwnd));
+
+            while (window.size() < effective_window && !eof_reached) {
+                if (!infile.read(file_buffer, MAX_PAYLOAD_SIZE) && infile.gcount() == 0) {
+                    eof_reached = true;
+                    break;
+                }
+
+                size_t bytes_read = infile.gcount();
+                std::vector<uint8_t> pkt_data = build_packet(seq_num, FLAG_DATA, file_buffer, bytes_read);
+                uint32_t expected_ack = seq_num + bytes_read;
+                
+                window.push_back({seq_num, expected_ack, pkt_data});
+                
+                sendto(sockfd, pkt_data.data(), pkt_data.size(), 0, (struct sockaddr*)&rec_addr, sizeof(rec_addr));
+                total_packets_sent++;
+                log_event("SEND", "Sent DATA Packet (Seq: " + std::to_string(seq_num) + ")");
+                
+                if (!timer_running) {
+                    window_timer.start();
+                    timer_running = true;
+                }
+                seq_num += bytes_read;
+            }
+
+            uint8_t ack_buffer[HEADER_SIZE + MAX_PAYLOAD_SIZE];
+            sockaddr_in src_addr{};
+            socklen_t addr_len = sizeof(src_addr);
+
+            ssize_t res = recvfrom(sockfd, ack_buffer, sizeof(ack_buffer), 0, (struct sockaddr*)&src_addr, &addr_len);
+            
+            if (res >= static_cast<ssize_t>(HEADER_SIZE)) {
+                Packet ack_pkt = deserialize_packet(ack_buffer, res);
+                uint16_t received_chk = ack_pkt.header.checksum;
+                
+                uint16_t zero_check = 0;
+                std::memcpy(&ack_buffer[10], &zero_check, 2); 
+
+                if (compute_checksum(ack_buffer, res) == received_chk && (ack_pkt.header.flags & FLAG_ACK)) {
+                    uint32_t ack_num = ack_pkt.header.ack_num;
+                    int acked_packets = 0;
+
+                    auto it = window.begin();
+                    while (it != window.end()) {
+                        if (it->expected_ack <= ack_num) {
+                            it = window.erase(it);
+                            acked_packets++;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    if (acked_packets > 0) {
+                        last_ack_num = ack_num;
+                        dup_ack_count = 0; 
+                        log_event("ACK", "Window advanced to ACK: " + std::to_string(ack_num));
+                        
+                        for (int i = 0; i < acked_packets; ++i) {
+                            if (cwnd < ssthresh) {
+                                cwnd += 1.0; 
+                            } else {
+                                cwnd += 1.0 / static_cast<int>(cwnd); 
+                            }
+                        }
+                        log_cwnd();
+
+                        if (window.empty()) {
+                            timer_running = false;
+                        } else {
+                            window_timer.start(); 
+                        }
+                    } else {
+                        
+                        if (ack_num == last_ack_num) {
+                            dup_ack_count++;
+                            if (dup_ack_count == 3) {
+                                log_event("FAST_RETRANSMIT", "3 Duplicate ACKs received for " + std::to_string(ack_num));
+                                
+                                ssthresh = std::max<uint32_t>(static_cast<uint32_t>(cwnd) / 2, 1);
+                                
+                                cwnd = ssthresh + 3.0; 
+                                log_cwnd();
+
+                                
+                                if (!window.empty()) {
+                                    const auto& missing_pkt = window.front();
+                                    sendto(sockfd, missing_pkt.data.data(), missing_pkt.data.size(), 0, (struct sockaddr*)&rec_addr, sizeof(rec_addr));
+                                    total_packets_sent++;
+                                    total_retransmissions++;
+                                    total_fast_retransmits++;
+                                    log_event("RETRANSMIT", "Fast Retransmitted DATA Packet (Seq: " + std::to_string(missing_pkt.seq_num) + ")");
+                                    
+                                    
+                                    window_timer.start();
+                                }
+                            } else if (dup_ack_count > 3) {
+                                
+                                cwnd += 1.0;
+                                log_cwnd();
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (timer_running && window_timer.elapsed_ms() >= 1000.0) {
+                total_timeouts++;
+                log_event("TIMEOUT", "RTO expired. Adjusting ssthresh and cwnd...");
+                
+                ssthresh = std::max<uint32_t>(static_cast<uint32_t>(cwnd) / 2, 1);
+                cwnd = 1.0;
+                dup_ack_count = 0; 
                 log_cwnd();
 
                 for (const auto& pkt : window) {
@@ -409,6 +588,7 @@ private:
             }
 
             if (packet_timer.elapsed_ms() >= 1000.0) {
+                total_timeouts++;
                 log_msg("TIMEOUT",
                         "RTO expired for " + pkt_type +
                         " Packet (Seq: " + std::to_string(current_seq) +
@@ -434,26 +614,28 @@ private:
         std::cout << "        TRANSFER METRICS          " << std::endl;
         std::cout << "========================================" << std::endl;
         std::cout << "Total Packets Sent (incl. retrans): " << total_packets_sent << std::endl;
+        std::cout << "Total Timeouts Triggered          : " << total_timeouts << std::endl;
+        std::cout << "Fast Retransmits Triggered        : " << total_fast_retransmits << std::endl;
         std::cout << "Number of Retransmissions         : " << total_retransmissions << std::endl;
         std::cout << "Total File Transfer Time          : " << total_transfer_time << " ms" << std::endl;
         std::cout << "========================================" << std::endl;
     }
 };
 
-
 SenderAlgorithm string_to_algorithm(const std::string& alg_name) {
     if (alg_name == "stop-and-wait") return STOP_AND_WAIT;
     if (alg_name == "sliding-window") return SLIDING_WINDOW;
     if (alg_name == "congestion-control") return CONGESTION_CONTROL;
+    if (alg_name == "fast-retransmit") return FAST_RETRANSMIT;
     
-    std::cerr << "Unreconginzed Algorithm" << std::endl;
+    std::cerr << "Unrecognized Algorithm: " << alg_name << std::endl;
     exit(-1); 
 }
 
-
 int main(int argc, char* argv[]) {
-    if (argc < 4) {
+    if (argc < 5) {
         std::cerr << "Usage: " << argv[0] << " <receiver_ip> <receiver_port> <input_file> <algorithm name>" << std::endl;
+        std::cerr << "Algorithms: stop-and-wait | sliding-window | congestion-control | fast-retransmit" << std::endl;
         return 1;
     }
 
