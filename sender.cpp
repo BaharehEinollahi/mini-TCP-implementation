@@ -618,6 +618,7 @@ private:
         std::cout << "Fast Retransmits Triggered        : " << total_fast_retransmits << std::endl;
         std::cout << "Number of Retransmissions         : " << total_retransmissions << std::endl;
         std::cout << "Total File Transfer Time          : " << total_transfer_time << " ms" << std::endl;
+        std::cout << "Throughput                        : " << std::fixed << std::setprecision(2) << total_packets_sent*1024/total_transfer_time << " KB/s" << std::endl;
         std::cout << "========================================" << std::endl;
     }
 };
