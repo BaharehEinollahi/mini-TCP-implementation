@@ -7,9 +7,9 @@
 #include <arpa/inet.h>
 
 constexpr uint16_t MAX_PAYLOAD_SIZE = 1024;
-constexpr size_t HEADER_SIZE = 13; // 4 + 4 + 2 + 2 + 1 bytes
+constexpr size_t HEADER_SIZE = 13; 
 
-// Flags definitions
+
 constexpr uint8_t FLAG_DATA = 0x01;
 constexpr uint8_t FLAG_ACK  = 0x02;
 constexpr uint8_t FLAG_FIN  = 0x04;
@@ -27,7 +27,7 @@ struct Packet {
     char payload[MAX_PAYLOAD_SIZE];
 };
 
-// Computes standard 16-bit Internet Checksum
+
 inline uint16_t compute_checksum(const uint8_t* data, size_t length) {
     uint32_t sum = 0;
     for (size_t i = 0; i < length - 1; i += 2) {
@@ -42,7 +42,7 @@ inline uint16_t compute_checksum(const uint8_t* data, size_t length) {
     return ~static_cast<uint16_t>(sum);
 }
 
-// Serializes a Packet struct into a raw byte vector (Network Byte Order)
+
 inline std::vector<uint8_t> serialize_packet(const Packet& packet) {
     std::vector<uint8_t> buffer(HEADER_SIZE + packet.header.length);
 
@@ -64,7 +64,7 @@ inline std::vector<uint8_t> serialize_packet(const Packet& packet) {
     return buffer;
 }
 
-// Deserializes a raw byte stream into a Packet struct (Host Byte Order)
+
 inline Packet deserialize_packet(const uint8_t* buffer, size_t total_length) {
     Packet packet;
     

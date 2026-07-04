@@ -26,11 +26,11 @@ for line in log_data.strip().split('\n'):
             delta_time = current_time_sec - prev_time
             delta_bytes = current_ack - prev_ack
             
-            # Calculate Bytes per second
+            
             throughput = delta_bytes / delta_time if delta_time > 0 else 0
             
-            # To show the 'dead zones' during timeouts accurately,
-            # we inject a 0 throughput point just before this ACK recovery
+            
+            
             if delta_time > 0.5: 
                 times.append(current_time_sec - 0.01)
                 throughputs.append(0)
@@ -41,7 +41,7 @@ for line in log_data.strip().split('\n'):
         prev_time = current_time_sec
         prev_ack = current_ack
 
-# Plotting
+
 plt.figure(figsize=(10, 5))
 plt.plot(times, throughputs, marker='o', linestyle='-', color='b')
 plt.title('Throughput Over Time')

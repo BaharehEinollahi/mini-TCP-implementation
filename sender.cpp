@@ -306,10 +306,8 @@ private:
                             break;
                         }
                     }
-
+                    log_event("ACK", "recevied ACK seq number: " + std::to_string(ack_num));
                     if (acked_packets > 0) {
-                        log_event("ACK", "Window advanced to ACK: " + std::to_string(ack_num));
-                        
                         for (int i = 0; i < acked_packets; ++i) {
                             if (cwnd < ssthresh) {
                                 
@@ -390,6 +388,7 @@ private:
 
         uint32_t last_ack_num = seq_num; 
         int dup_ack_count = 0;
+        bool in_fast_recovery = false;
 
         while (!eof_reached || !window.empty()) {
             uint32_t effective_window = std::min(RECEIVER_WINDOW, static_cast<uint32_t>(cwnd));
@@ -444,16 +443,22 @@ private:
                         }
                     }
 
+                    log_event("ACK", "recevied ACK seq number: " + std::to_string(ack_num));
                     if (acked_packets > 0) {
                         last_ack_num = ack_num;
                         dup_ack_count = 0; 
-                        log_event("ACK", "Window advanced to ACK: " + std::to_string(ack_num));
                         
-                        for (int i = 0; i < acked_packets; ++i) {
-                            if (cwnd < ssthresh) {
-                                cwnd += 1.0; 
-                            } else {
-                                cwnd += 1.0 / static_cast<int>(cwnd); 
+                        if (in_fast_recovery) {
+                            cwnd = ssthresh; 
+                            in_fast_recovery = false;
+                        } 
+                        else {
+                            for (int i = 0; i < acked_packets; ++i) {
+                                if (cwnd < ssthresh) {
+                                    cwnd += 1.0; 
+                                } else {
+                                    cwnd += 1.0 / static_cast<int>(cwnd); 
+                                }
                             }
                         }
                         log_cwnd();
@@ -463,7 +468,8 @@ private:
                         } else {
                             window_timer.start(); 
                         }
-                    } else {
+                    } 
+                    else {
                         
                         if (ack_num == last_ack_num) {
                             dup_ack_count++;
@@ -471,8 +477,8 @@ private:
                                 log_event("FAST_RETRANSMIT", "3 Duplicate ACKs received for " + std::to_string(ack_num));
                                 
                                 ssthresh = std::max<uint32_t>(static_cast<uint32_t>(cwnd) / 2, 1);
-                                
                                 cwnd = ssthresh + 3.0; 
+                                in_fast_recovery = true;
                                 log_cwnd();
 
                                 
@@ -488,7 +494,6 @@ private:
                                     window_timer.start();
                                 }
                             } else if (dup_ack_count > 3) {
-                                
                                 cwnd += 1.0;
                                 log_cwnd();
                             }
@@ -504,6 +509,7 @@ private:
                 ssthresh = std::max<uint32_t>(static_cast<uint32_t>(cwnd) / 2, 1);
                 cwnd = 1.0;
                 dup_ack_count = 0; 
+                in_fast_recovery = false;
                 log_cwnd();
 
                 for (const auto& pkt : window) {

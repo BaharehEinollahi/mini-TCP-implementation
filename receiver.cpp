@@ -102,7 +102,7 @@ private:
     sockaddr_in local_addr;
     std::ofstream outfile;
     uint32_t expected_seq_num;
-    std::map<uint32_t, Packet> packet_buffer; // Out-of-order packet buffer
+    std::map<uint32_t, Packet> packet_buffer;
     
     double loss_prob;
     int delay_ms;

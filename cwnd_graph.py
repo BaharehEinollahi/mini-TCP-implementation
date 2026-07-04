@@ -25,4 +25,3 @@ ax.legend(fontsize=11)
 plt.tight_layout()
 
 plt.show()
-# plt.savefig('cwnd_over_time_graph.png', dpi=300)
