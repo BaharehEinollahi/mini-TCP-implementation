@@ -4,7 +4,7 @@ This project implements a reliable **Mini-TCP protocol** built on top of unrelia
 
 ---
 
-## 🛠️ Core Design & Protocol Structure
+## Core Design & Protocol Structure
 
 The project builds a custom transport layer over UDP using a 13-byte header and a maximum payload size of 1024 bytes per packet.
 
@@ -20,7 +20,7 @@ The project builds a custom transport layer over UDP using a 13-byte header and 
 
 ---
 
-## 🚀 Implemented Phases & Features
+## Implemented Phases & Features
 
 ### 1. Stop-and-Wait Reliable Transfer
 
@@ -78,7 +78,7 @@ The project builds a custom transport layer over UDP using a 13-byte header and 
 
 ---
 
-## 💻 How to Run
+## How to Run
 
 Examples of running the server and client components with loss and delay parameters:
 
