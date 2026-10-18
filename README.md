@@ -1,6 +1,6 @@
 # Mini-TCP Protocol Implementation Over UDP
 
-This project implements a reliable **Mini-TCP protocol** built on top of unreliable UDP/IP sockets. It was developed by Bahareh Einollahi and Rayhaneh Einollahi for a Computer Network course.
+This project implements a reliable **Mini-TCP protocol** built on top of unreliable UDP/IP sockets.
 
 ---
 
@@ -11,22 +11,10 @@ The project builds a custom transport layer over UDP using a 13-byte header and 
 * **Packet Header Structure:** Contains sequence numbers (`seq_num`), acknowledgment numbers (`ack_num`), payload length (`length`), an Internet checksum (`checksum`), and control flags.
 
 
-* **Control Flags:**
-* `FLAG_DATA` (`0x01`): Indicates normal data payload.
-
-
-* `FLAG_ACK` (`0x02`): Indicates an acknowledgment message.
-
-
-* `FLAG_FIN` (`0x04`): Used to cleanly close the connection.
-
-
-
-
 * **Checksum (`compute_checksum`):** Uses a standard 16-bit Internet Checksum to detect and catch data corruption during transmission.
 
 
-* **Serialization:** Converts C++ packet structs into a flat byte array using Network Byte Order (Big Endian) via `htonl` and `htons`.
+* **Serialization:** Converts C++ packet structs into a flat byte array using Network Byte Order via `htonl` and `htons`.
 
 
 
@@ -45,7 +33,7 @@ The project builds a custom transport layer over UDP using a 13-byte header and 
 
 ### 2. Sliding Window Protocol
 
-* Upgraded to send multiple packets concurrently up to a fixed window size (`WINDOW_SIZE = 5`) to improve network efficiency and throughput.
+* Sends multiple packets concurrently up to a fixed window size (`WINDOW_SIZE = 5`) to improve network efficiency and throughput.
 
 
 * The receiver buffers out-of-order packets instead of dropping them, achieving cumulative acknowledgments.
